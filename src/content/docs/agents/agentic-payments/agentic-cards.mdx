@@ -1,0 +1,450 @@
+---
+title: Agentic cards
+pcx_content_type: navigation
+sidebar:
+  order: 2
+  group:
+    hideIndex: false
+---
+
+## What are agentic cards?
+
+Agentic cards enable AI agents to make secure purchases on behalf of consumers using tokenized payment credentials. This approach allows agents to autonomously complete transactions while maintaining PCI compliance and protecting sensitive payment data.
+
+Unlike traditional payment flows that require human intervention at checkout, agentic cards provide agents with temporary, scoped virtual payment credentials that can be used to complete purchases within defined parameters and mandates.
+
+## How agentic cards work
+
+The agentic card flow involves several key steps:
+
+1. **Card tokenization** - Securely capture and tokenize payment card data using secure elements
+2. **Payment method creation** - Convert the token into a payment method using a Worker
+3. **Purchase intent** - Generate a scoped virtual card credential with spending limits and mandates
+4. **Verification** - Authenticate the cardholder and authorize the purchase intent
+5. **Virtual card retrieval** - Access the virtual card details for payment processing
+
+This process ensures that agents can make purchases while maintaining security boundaries and user consent.
+
+## Payment network standards
+
+Agentic cards are built on established payment network standards that enable secure, autonomous transactions:
+
+### Visa Intelligent Commerce
+
+[Visa Intelligent Commerce](https://developer.visa.com/capabilities/intelligent-commerce) provides a framework for AI agents to make payments on behalf of consumers. Key features include:
+
+- **Delegated authentication** - Consumers can pre-authorize agents to make purchases within defined parameters
+- **Dynamic spending controls** - Real-time limits based on merchant category, amount, and time windows  
+- **Tokenized credentials** - Virtual card numbers that protect underlying payment data
+- **Transaction transparency** - Detailed logging and reporting for all agent-initiated purchases
+
+### Mastercard Agent Pay
+
+[Mastercard Agent Pay](https://developer.mastercard.com/agent-pay/documentation/) enables secure agent-to-merchant transactions through:
+
+- **Consent management** - Granular user permissions for different types of purchases
+- **Risk assessment** - Built-in fraud detection and transaction monitoring
+- **Merchant integration** - Standardized APIs for accepting agent payments
+- **Cross-border support** - Global payment processing with local compliance
+
+Both standards ensure that agentic payments maintain the same security and regulatory compliance as traditional card transactions while enabling the automation required for AI agent workflows.
+
+## Before you begin
+
+To implement agentic cards, you will need:
+
+- A Cloudflare Workers account
+- Access to a tokenization service (such as Basis Theory)
+- Integration with payment networks that support virtual card credentials
+- Frontend elements for secure card data capture
+
+## Collect card data securely
+
+First, implement secure card data collection using tokenization elements. This ensures your systems never handle raw payment card data while maintaining PCI compliance.
+
+### Frontend implementation
+
+Use secure elements to capture card data and create a token:
+
+```js
+import { basistheory } from '@basis-theory/web-elements';
+
+let bt;
+let cardNumberElement;
+let cardExpirationDateElement;
+let cardVerificationCodeElement;
+
+async function init() {
+  bt = await basistheory('YOUR_PUBLIC_KEY');
+  
+  // Create secure elements
+  cardNumberElement = bt.createElement('cardNumber', {
+    targetId: 'myCardNumber'
+  });
+  cardExpirationDateElement = bt.createElement('cardExpirationDate', {
+    targetId: 'myCardExpiration'
+  });
+  cardVerificationCodeElement = bt.createElement('cardVerificationCode', {
+    targetId: 'myCardVerification'
+  });
+  
+  // Mount elements to DOM
+  await Promise.all([
+    cardNumberElement.mount('#cardNumber'),
+    cardExpirationDateElement.mount('#cardExpirationDate'),
+    cardVerificationCodeElement.mount('#cardVerificationCode'),
+  ]);
+}
+
+async function tokenizeCard() {
+  try {
+    const token = await bt.tokens.create({
+      type: 'card',
+      data: {
+        number: cardNumberElement,
+        expiration_month: cardExpirationDateElement.month(),
+        expiration_year: cardExpirationDateElement.year(),
+        cvc: cardVerificationCodeElement,
+      }
+    });
+    
+    // Send token to your Worker
+    const response = await fetch('/api/create-payment-method', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ tokenId: token.id, entityId: 'user-12345' })
+    });
+    
+    return response.json();
+  } catch (error) {
+    console.error('Tokenization failed:', error);
+  }
+}
+```
+
+## Create payment method using a Worker
+
+Use a Cloudflare Worker to securely create payment methods from tokenized card data:
+
+```ts
+export default {
+  async fetch(request: Request, env: Env): Promise<Response> {
+    if (request.method !== 'POST') {
+      return new Response('Method not allowed', { status: 405 });
+    }
+    
+    const { tokenId, entityId } = await request.json();
+    
+    try {
+      // Create JWT for authentication
+      const jwt = await createJWT(env.AI_PROJECT_ID, env.PRIVATE_KEY);
+      
+      // Create payment method via Basis Theory AI
+      const response = await fetch(
+        `https://api.basistheory.ai/projects/${env.AI_PROJECT_ID}/payment-methods`,
+        {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${jwt}`,
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({
+            entityId,
+            tokenId
+          })
+        }
+      );
+      
+      if (!response.ok) {
+        throw new Error(`Payment method creation failed: ${response.statusText}`);
+      }
+      
+      const paymentMethod = await response.json();
+      
+      return Response.json({
+        success: true,
+        paymentMethodId: paymentMethod.id
+      });
+      
+    } catch (error) {
+      return Response.json(
+        { error: 'Failed to create payment method' },
+        { status: 500 }
+      );
+    }
+  }
+};
+
+async function createJWT(projectId: string, privateKey: string): Promise<string> {
+  // Implementation for JWT creation
+  // This would typically use a JWT library to sign with your private key
+  // and include the necessary claims for Basis Theory AI authentication
+}
+```
+
+## Create purchase intent using a Worker
+
+Generate a purchase intent with spending limits and mandates:
+
+```ts
+export default {
+  async fetch(request: Request, env: Env): Promise<Response> {
+    if (request.method !== 'POST') {
+      return new Response('Method not allowed', { status: 405 });
+    }
+    
+    const { paymentMethodId, entityId, maxAmount, currency, consumerEmail } = await request.json();
+    
+    try {
+      const jwt = await createJWT(env.AI_PROJECT_ID, env.PRIVATE_KEY);
+      
+      const response = await fetch(
+        `https://api.basistheory.ai/projects/${env.AI_PROJECT_ID}/purchase-intents`,
+        {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${jwt}`,
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({
+            entityId,
+            credentialType: 'virtual-card',
+            paymentMethodId,
+            mandates: [
+              {
+                type: 'maxAmount',
+                value: maxAmount,
+                details: { currency }
+              },
+              {
+                type: 'consumer',
+                value: entityId,
+                details: { email: consumerEmail }
+              }
+            ]
+          })
+        }
+      );
+      
+      if (!response.ok) {
+        throw new Error(`Purchase intent creation failed: ${response.statusText}`);
+      }
+      
+      const purchaseIntent = await response.json();
+      
+      return Response.json({
+        success: true,
+        purchaseIntentId: purchaseIntent.id,
+        status: purchaseIntent.status
+      });
+      
+    } catch (error) {
+      return Response.json(
+        { error: 'Failed to create purchase intent' },
+        { status: 500 }
+      );
+    }
+  }
+};
+```
+
+## Verify purchase intent
+
+Most purchase intents require verification to confirm user ownership and consent. Handle this on the frontend:
+
+```js
+import { useBasisTheory } from '@basis-theory-ai/react';
+
+function VerificationComponent({ projectId, purchaseIntentId }) {
+  const { verifyPurchaseIntent } = useBasisTheory();
+  
+  const handleVerify = async () => {
+    try {
+      const result = await verifyPurchaseIntent(projectId, purchaseIntentId);
+      console.log('Verification result:', result);
+      
+      // Proceed to retrieve virtual card
+      if (result.status === 'active') {
+        await retrieveVirtualCard(purchaseIntentId);
+      }
+    } catch (error) {
+      console.error('Verification failed:', error);
+    }
+  };
+  
+  return (
+    <button onClick={handleVerify}>
+      Verify Purchase Intent
+    </button>
+  );
+}
+```
+
+The verification process handles:
+- **Authentication** - Two-factor authentication to verify the consumer
+- **Authorization** - User consent for the specific purchase parameters
+- **Device fingerprinting** - Streamlined future authentications
+
+## Retrieve virtual card using a Worker
+
+Once verified, retrieve the virtual card credentials for payment processing:
+
+```ts
+export default {
+  async fetch(request: Request, env: Env): Promise<Response> {
+    if (request.method !== 'GET') {
+      return new Response('Method not allowed', { status: 405 });
+    }
+    
+    const url = new URL(request.url);
+    const purchaseIntentId = url.pathname.split('/').pop();
+    
+    if (!purchaseIntentId) {
+      return Response.json(
+        { error: 'Purchase intent ID required' },
+        { status: 400 }
+      );
+    }
+    
+    try {
+      const jwt = await createJWT(env.AI_PROJECT_ID, env.PRIVATE_KEY);
+      
+      const response = await fetch(
+        `https://api.basistheory.ai/projects/${env.AI_PROJECT_ID}/purchase-intents/${purchaseIntentId}`,
+        {
+          method: 'GET',
+          headers: {
+            'Authorization': `Bearer ${jwt}`
+          }
+        }
+      );
+      
+      if (!response.ok) {
+        throw new Error(`Failed to retrieve purchase intent: ${response.statusText}`);
+      }
+      
+      const purchaseIntent = await response.json();
+      
+      if (purchaseIntent.status !== 'active') {
+        return Response.json(
+          { error: 'Purchase intent not active' },
+          { status: 400 }
+        );
+      }
+      
+      // Return virtual card details for agent use
+      return Response.json({
+        success: true,
+        virtualCard: {
+          number: purchaseIntent.virtualCard.number,
+          expiryMonth: purchaseIntent.virtualCard.expiryMonth,
+          expiryYear: purchaseIntent.virtualCard.expiryYear,
+          cvv: purchaseIntent.virtualCard.cvv,
+          maxAmount: purchaseIntent.maxAmount,
+          currency: purchaseIntent.currency
+        }
+      });
+      
+    } catch (error) {
+      return Response.json(
+        { error: 'Failed to retrieve virtual card' },
+        { status: 500 }
+      );
+    }
+  }
+};
+```
+
+## Agent integration
+
+Integrate agentic cards into your AI agents for autonomous purchasing:
+
+```ts
+import { Agent } from "agents";
+
+export class ShoppingAgent extends Agent<Env> {
+  async onRequest(request: Request) {
+    const { item, maxPrice, userEntityId } = await request.json();
+    
+    try {
+      // Create purchase intent
+      const purchaseIntent = await this.createPurchaseIntent({
+        entityId: userEntityId,
+        maxAmount: maxPrice,
+        currency: 'USD'
+      });
+      
+      // Agent can now use virtual card for purchases
+      if (purchaseIntent.status === 'active') {
+        const virtualCard = await this.getVirtualCard(purchaseIntent.id);
+        return await this.makePurchase(item, virtualCard);
+      }
+      
+      return Response.json({ 
+        error: 'Purchase intent requires verification' 
+      });
+      
+    } catch (error) {
+      return Response.json({ 
+        error: 'Purchase failed' 
+      }, { status: 500 });
+    }
+  }
+  
+  private async createPurchaseIntent(params: any) {
+    const response = await fetch(`${this.env.WORKER_URL}/api/purchase-intent`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(params)
+    });
+    return response.json();
+  }
+  
+  private async getVirtualCard(purchaseIntentId: string) {
+    const response = await fetch(`${this.env.WORKER_URL}/api/virtual-card/${purchaseIntentId}`);
+    return response.json();
+  }
+  
+  private async makePurchase(item: any, virtualCard: any) {
+    // Use virtual card to complete purchase with merchant
+    // Implementation depends on payment processor integration
+  }
+}
+```
+
+## Configuration
+
+Add the necessary bindings to your `wrangler.toml`:
+
+```toml
+name = "agentic-cards-worker"
+main = "src/index.ts"
+compatibility_date = "2024-01-01"
+
+[vars]
+AI_PROJECT_ID = "your-project-id"
+
+[secrets]
+PRIVATE_KEY = "your-private-key"
+
+[[durable_objects.bindings]]
+name = "ShoppingAgent"
+class_name = "ShoppingAgent"
+```
+
+## Security considerations
+
+When implementing agentic cards:
+
+- **Never store raw payment data** - Always use tokenization
+- **Implement proper authentication** - Use JWTs and secure key management
+- **Set appropriate mandates** - Limit spending amounts and merchant categories
+- **Monitor transactions** - Log and audit all agent-initiated purchases
+- **Handle verification flows** - Ensure proper user consent mechanisms
+
+## Next steps
+
+- Explore [payment processing integrations](/workers/examples/) for completing transactions
+- Learn about [Durable Objects](/durable-objects/) for maintaining agent state
+- Review [security best practices](/workers/platform/security/) for payment handling
+- Check out the [complete example](https://github.com/cloudflare/agents/tree/main/examples/agentic-cards) implementation
