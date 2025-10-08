@@ -264,7 +264,7 @@ function VerificationComponent({ projectId, purchaseIntentId }) {
       console.log('Verification result:', result);
       
       // Proceed to retrieve virtual card
-      if (result.status === 'active') {
+      if (result.status === 'VERIFIED') {
         await retrieveVirtualCard(purchaseIntentId);
       }
     } catch (error) {
