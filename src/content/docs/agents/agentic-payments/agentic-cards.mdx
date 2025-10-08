@@ -336,10 +336,10 @@ export default {
       return Response.json({
         success: true,
         virtualCard: {
-          number: purchaseIntent.virtualCard.number,
-          expiryMonth: purchaseIntent.virtualCard.expiryMonth,
-          expiryYear: purchaseIntent.virtualCard.expiryYear,
-          cvv: purchaseIntent.virtualCard.cvv,
+          number: purchaseIntent.card.number,
+          expiryMonth: purchaseIntent.card.expirationMonth,
+          expiryYear: purchaseIntent.card.expirationYear,
+          cvv: purchaseIntent.card.cvc,
           maxAmount: purchaseIntent.maxAmount,
           currency: purchaseIntent.currency
         }
