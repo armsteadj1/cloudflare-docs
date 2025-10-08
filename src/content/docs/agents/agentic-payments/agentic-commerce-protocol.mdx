@@ -1,0 +1,428 @@
+---
+title: Agentic Commerce Protocol
+pcx_content_type: navigation
+sidebar:
+  order: 3
+  group:
+    hideIndex: false
+---
+
+## What is the Agentic Commerce Protocol?
+
+The [Agentic Commerce Protocol (ACP)](https://www.agenticcommerce.dev/) is an open standard for programmatic commerce flows between buyers, AI agents, and businesses. Developed collaboratively by Stripe and OpenAI, ACP defines a common language for how agents and businesses transact, including coordinating checkout and securely sharing payment credentials.
+
+This guide shows you how to implement ACP using Cloudflare Workers, enabling AI agents to securely make purchases on behalf of consumers using Shared Payment Tokens.
+
+## Why ACP matters
+
+The Agentic Commerce Protocol provides several key benefits for autonomous commerce:
+
+- **Open standard** - Community-designed under Apache 2.0 license, allowing any business to implement the specification
+- **Business control** - Merchants maintain customer relationships as the merchant of record, controlling product presentation and order fulfillment
+- **Secure credentials** - Payment tokens have usage limits and expiry windows without revealing PANs or raw credentials
+- **Platform agnostic** - Works with any AI agent or payment processor that implements the standard
+
+Stripe is the first payment service provider to implement ACP with Shared Payment Tokens, with more merchants and platforms expected to adopt the protocol. OpenAI has integrated ACP into ChatGPT's Instant Checkout feature, enabling users to make purchases directly within AI conversations.
+
+## How ACP works
+
+The ACP flow involves several key steps:
+
+1. **Card tokenization** - Securely capture and tokenize payment card data using secure elements
+2. **Payment method creation** - Convert tokens into Stripe payment methods using a Worker
+3. **Shared Payment Token generation** - Create time-limited, amount-limited tokens using a Worker
+4. **Agent commerce** - AI agents use tokens to make purchases across ACP-enabled merchants
+5. **Transaction completion** - Merchants process payments using the shared tokens
+
+This process enables agents to make purchases while maintaining security boundaries and merchant control.
+
+## Before you begin
+
+To implement ACP, you will need:
+
+- A Cloudflare Workers account
+- Access to a tokenization service (such as Basis Theory)
+- A Stripe account with ACP support
+- Frontend elements for secure card data capture
+
+## Collect card data securely
+
+First, implement secure card data collection using tokenization elements. This ensures your systems never handle raw payment card data while maintaining PCI compliance.
+
+### Frontend implementation
+
+Use secure elements to capture card data and create a token:
+
+```js
+import { basistheory } from '@basis-theory/web-elements';
+
+let bt;
+let cardNumberElement;
+let cardExpirationDateElement;
+let cardVerificationCodeElement;
+
+async function init() {
+  bt = await basistheory('YOUR_PUBLIC_KEY');
+  
+  // Create secure elements
+  cardNumberElement = bt.createElement('cardNumber', {
+    targetId: 'cardNumber'
+  });
+  cardExpirationDateElement = bt.createElement('cardExpirationDate', {
+    targetId: 'cardExpiration'
+  });
+  cardVerificationCodeElement = bt.createElement('cardVerificationCode', {
+    targetId: 'cardVerification'
+  });
+  
+  // Mount elements to DOM
+  await Promise.all([
+    cardNumberElement.mount('#cardNumber'),
+    cardExpirationDateElement.mount('#cardExpirationDate'),
+    cardVerificationCodeElement.mount('#cardVerificationCode'),
+  ]);
+  
+  // Bind card brand to verification code element
+  cardNumberElement.on('change', ({ cardBrand }) => {
+    cardVerificationCodeElement.update({ cardBrand });
+  });
+}
+
+async function createPaymentMethod() {
+  try {
+    // Create Basis Theory token
+    const token = await bt.tokens.create({
+      type: 'card',
+      data: {
+        number: cardNumberElement,
+        expiration_month: cardExpirationDateElement.month(),
+        expiration_year: cardExpirationDateElement.year(),
+        cvc: cardVerificationCodeElement,
+      }
+    });
+    
+    console.log('Basis Theory token created:', token.id);
+    
+    // Send token to your Worker for Stripe integration
+    const response = await fetch('/api/create-stripe-payment-method', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ tokenId: token.id })
+    });
+    
+    const result = await response.json();
+    console.log('Stripe payment method created:', result.paymentMethodId);
+    
+  } catch (error) {
+    console.error('Error:', error);
+  }
+}
+
+init();
+```
+
+## Create Stripe payment method using a Worker
+
+Use a Cloudflare Worker to create Stripe payment methods from Basis Theory tokens:
+
+```ts
+export default {
+  async fetch(request: Request, env: Env): Promise<Response> {
+    if (request.method !== 'POST') {
+      return new Response('Method not allowed', { status: 405 });
+    }
+    
+    const { tokenId } = await request.json();
+    
+    try {
+      // Create Stripe payment method using Basis Theory Proxy
+      const response = await fetch('https://api.basistheory.com/proxy', {
+        method: 'POST',
+        headers: {
+          'BT-API-KEY': env.BASIS_THEORY_PRIVATE_KEY,
+          'BT-PROXY-URL': 'https://api.stripe.com/v1/payment_methods',
+          'Content-Type': 'application/x-www-form-urlencoded',
+          'Authorization': `Bearer ${env.STRIPE_SECRET_KEY}`
+        },
+        body: new URLSearchParams({
+          'type': 'card',
+          'card[number]': `{{ ${tokenId} | json: '$.data.number' }}`,
+          'card[exp_month]': `{{ ${tokenId} | json: '$.data.expiration_month' }}`,
+          'card[exp_year]': `{{ ${tokenId} | json: '$.data.expiration_year' }}`,
+          'card[cvc]': `{{ ${tokenId} | json: '$.data.cvc' }}`
+        })
+      });
+      
+      if (!response.ok) {
+        throw new Error(`Stripe API error: ${response.statusText}`);
+      }
+      
+      const paymentMethod = await response.json();
+      
+      return Response.json({
+        success: true,
+        paymentMethodId: paymentMethod.id,
+        card: {
+          brand: paymentMethod.card.brand,
+          last4: paymentMethod.card.last4,
+          expMonth: paymentMethod.card.exp_month,
+          expYear: paymentMethod.card.exp_year
+        }
+      });
+      
+    } catch (error) {
+      return Response.json(
+        { error: 'Failed to create payment method' },
+        { status: 500 }
+      );
+    }
+  }
+};
+```
+
+## Create Shared Payment Token using a Worker
+
+Generate Shared Payment Tokens for agentic commerce with built-in usage limits:
+
+```ts
+export default {
+  async fetch(request: Request, env: Env): Promise<Response> {
+    if (request.method !== 'POST') {
+      return new Response('Method not allowed', { status: 405 });
+    }
+    
+    const { 
+      paymentMethodId, 
+      maxAmount, 
+      currency = 'usd',
+      expiresAt,
+      networkId,
+      externalId 
+    } = await request.json();
+    
+    try {
+      // Create Shared Payment Token via Stripe API
+      const formData = new URLSearchParams({
+        'payment_method': paymentMethodId,
+        'usage_limits[currency]': currency,
+        'usage_limits[max_amount]': maxAmount.toString(),
+        'usage_limits[expires_at]': expiresAt.toString(),
+        'seller_details[network_id]': networkId
+      });
+      
+      if (externalId) {
+        formData.append('seller_details[external_id]', externalId);
+      }
+      
+      const response = await fetch('https://api.stripe.com/v1/shared_payment/issued_tokens', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${env.STRIPE_SECRET_KEY}`,
+          'Content-Type': 'application/x-www-form-urlencoded'
+        },
+        body: formData
+      });
+      
+      if (!response.ok) {
+        const error = await response.text();
+        throw new Error(`Stripe API error: ${error}`);
+      }
+      
+      const sharedToken = await response.json();
+      
+      return Response.json({
+        success: true,
+        sharedTokenId: sharedToken.id,
+        status: sharedToken.status,
+        usageLimits: {
+          currency: sharedToken.usage_limits.currency,
+          maxAmount: sharedToken.usage_limits.max_amount,
+          expiresAt: sharedToken.usage_limits.expires_at
+        },
+        sellerDetails: sharedToken.seller_details
+      });
+      
+    } catch (error) {
+      return Response.json(
+        { error: 'Failed to create shared payment token' },
+        { status: 500 }
+      );
+    }
+  }
+};
+```
+
+## Agent integration with ACP
+
+Integrate ACP into your AI agents for autonomous purchasing across compatible merchants:
+
+```ts
+import { Agent } from "agents";
+
+export class ACPShoppingAgent extends Agent<Env> {
+  async onRequest(request: Request) {
+    const { 
+      customerId, 
+      maxAmount, 
+      currency, 
+      networkId,
+      merchantUrl,
+      items 
+    } = await request.json();
+    
+    try {
+      // Create shared payment token for this shopping session
+      const tokenResponse = await this.createSharedPaymentToken({
+        customerId,
+        maxAmount,
+        currency,
+        networkId,
+        expiresAt: Math.floor(Date.now() / 1000) + 3600 // 1 hour
+      });
+      
+      if (!tokenResponse.success) {
+        return Response.json({ error: 'Failed to create payment token' });
+      }
+      
+      // Use shared token to make purchase at ACP-enabled merchant
+      const purchaseResult = await this.makePurchase(
+        merchantUrl,
+        items,
+        tokenResponse.sharedTokenId
+      );
+      
+      return Response.json({
+        success: true,
+        orderId: purchaseResult.orderId,
+        amount: purchaseResult.amount,
+        currency: purchaseResult.currency,
+        status: purchaseResult.status
+      });
+      
+    } catch (error) {
+      return Response.json({ 
+        error: 'Purchase failed' 
+      }, { status: 500 });
+    }
+  }
+  
+  private async createSharedPaymentToken(params: any) {
+    const response = await fetch(`${this.env.WORKER_URL}/api/create-shared-token`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(params)
+    });
+    return response.json();
+  }
+  
+  private async makePurchase(merchantUrl: string, items: any[], sharedTokenId: string) {
+    // Make purchase at ACP-enabled merchant using shared token
+    const response = await fetch(`${merchantUrl}/api/acp/purchase`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        items,
+        shared_payment_token: sharedTokenId
+      })
+    });
+    
+    if (!response.ok) {
+      throw new Error(`Purchase failed: ${response.statusText}`);
+    }
+    
+    return response.json();
+  }
+}
+```
+
+## Merchant integration
+
+ACP-enabled merchants can accept Shared Payment Tokens and create payments:
+
+```ts
+export default {
+  async fetch(request: Request, env: Env): Promise<Response> {
+    if (request.method !== 'POST') {
+      return new Response('Method not allowed', { status: 405 });
+    }
+    
+    const { items, shared_payment_token } = await request.json();
+    
+    try {
+      // Calculate total amount
+      const amount = items.reduce((sum: number, item: any) => 
+        sum + (item.price * item.quantity), 0
+      );
+      
+      // Create payment intent using shared token
+      const formData = new URLSearchParams({
+        'amount': amount.toString(),
+        'currency': 'usd',
+        'shared_payment_granted_token': shared_payment_token,
+        'confirm': 'true'
+      });
+      
+      const response = await fetch('https://api.stripe.com/v1/payment_intents', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${env.STRIPE_SECRET_KEY}`,
+          'Content-Type': 'application/x-www-form-urlencoded'
+        },
+        body: formData
+      });
+      
+      if (!response.ok) {
+        throw new Error(`Payment failed: ${response.statusText}`);
+      }
+      
+      const paymentIntent = await response.json();
+      
+      // Create order record
+      const orderId = `order_${Date.now()}`;
+      
+      return Response.json({
+        success: true,
+        orderId,
+        amount,
+        currency: 'usd',
+        status: paymentIntent.status,
+        paymentIntentId: paymentIntent.id
+      });
+      
+    } catch (error) {
+      return Response.json(
+        { error: 'Payment processing failed' },
+        { status: 500 }
+      );
+    }
+  }
+};
+```
+
+## Configuration
+
+Add the necessary bindings and secrets to your `wrangler.toml`:
+
+```toml
+name = "acp-worker"
+main = "src/index.ts"
+compatibility_date = "2024-01-01"
+
+[vars]
+WORKER_URL = "https://your-worker.your-subdomain.workers.dev"
+
+[secrets]
+BASIS_THEORY_PRIVATE_KEY = "your-basis-theory-private-key"
+STRIPE_SECRET_KEY = "your-stripe-secret-key"
+
+[[durable_objects.bindings]]
+name = "ACPShoppingAgent"
+class_name = "ACPShoppingAgent"
+```
+
+## Next steps
+
+- Explore [Stripe's ACP documentation](https://stripe.com/docs/shared-payment) for advanced features
+- Learn about [Durable Objects](/durable-objects/) for maintaining agent state
+- Review [security best practices](/workers/platform/security/) for payment handling
+- Check out the [complete example](https://github.com/cloudflare/agents/tree/main/examples/acp) implementation
